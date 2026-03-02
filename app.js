@@ -71,6 +71,11 @@ function init() {
   cleanupLegacy();
   initSupabase();
   window.addEventListener("hashchange", () => route());
+  // Guarda inmediatamente si el navegador se cierra o la pestaña se cambia,
+  // sin esperar el debounce de 800ms — así nunca se pierde el último tipeo.
+  window.addEventListener("beforeunload", () => {
+    if (editorState) saveEditorLocal(editorState);
+  });
   route();
 }
 
