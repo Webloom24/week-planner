@@ -45,6 +45,7 @@ const BLOCKS = [
 const LS_KEY = "contentPlanner_v1";
 const LS_SLUG_KEY = "contentPlanner_slug";
 const LS_WRITE_KEY = "contentPlanner_writeKey";
+const LS_PUBLISHED_KEY = "contentPlanner_lastPublished";
 const OLD_LS_KEYS = ["weeklyPlanner_v1"];
 
 /* ══════════════════════════════════════════════
@@ -58,7 +59,9 @@ let editorState = null; // datos del editor
 let activeTab = "week";
 let currentSlug = null;
 let writeKey = null;
-let lastReaderUpdated = null; // updated_at del último fetch
+let lastReaderUpdated = null;    // updated_at del último fetch
+let lastPublishedSnapshot = null; // JSON del estado tras el último publish
+let isDirty = false;              // hay cambios sin publicar en Supabase
 
 /* ══════════════════════════════════════════════
    ④ ARRANQUE
@@ -130,7 +133,8 @@ function renderEditorView() {
   bindEditorEvents();
   updateEditorWeekRange();
   renderBoard();
-  updateSaveStatus("ok");
+  initPublishState();
+  updateShareBtn();
   updateSlugInfo();
 }
 
@@ -150,9 +154,10 @@ function buildEditorHTML() {
         </div>
       </div>
       <div class="actions">
-        <span id="saveStatus" class="save-status save-status--ok">Guardado ✓</span>
+        <span id="publishStatus" class="publish-status publish-status--none"></span>
         <span id="planSlugInfo" class="plan-slug-info" style="display:none"></span>
-        <button id="shareBtn" class="btn btn-share" type="button">${currentSlug ? "Copiar link de la tía" : "Crear y copiar link"}</button>
+        <button id="publishBtn" class="btn btn-publish" type="button">Guardar cambios</button>
+        <button id="shareBtn" class="btn btn-share" type="button">Copiar link de la tía</button>
         <button id="exportPngBtn" class="btn btn-soft" type="button">Guardar imagen</button>
         <button id="exportPdfBtn" class="btn btn-primary" type="button">Exportar PDF</button>
         <button id="resetBtn" class="btn btn-danger" type="button">Reset</button>
@@ -181,7 +186,7 @@ function buildEditorHTML() {
         <div id="board" class="board board--week"></div>
       </div>
     </main>
-    <button id="floatingShareBtn" class="floating-share" type="button">↗ ${currentSlug ? "Copiar link" : "Crear link"}</button>
+    <button id="floatingShareBtn" class="floating-share" type="button">↗ Copiar link</button>
   `;
 }
 
@@ -254,6 +259,7 @@ function buildDayColumn(dayDef, dateObj) {
     ta.addEventListener("input", () => {
       editorState.days[dayDef.key][b.key] = ta.value;
       scheduleAutoSave();
+      markDirty();
     });
 
     blockEl.appendChild(label);
@@ -300,13 +306,21 @@ function bindEditorEvents() {
     saveEditorLocal(editorState);
     localStorage.removeItem(LS_SLUG_KEY);
     localStorage.removeItem(LS_WRITE_KEY);
+    localStorage.removeItem(LS_PUBLISHED_KEY);
     currentSlug = null;
     writeKey = null;
+    lastPublishedSnapshot = null;
+    isDirty = false;
     renderBoard();
     updateEditorWeekRange();
-    updateSaveStatus("ok");
+    updatePublishStatus("none");
+    updatePublishBtn();
+    updateShareBtn();
     updateSlugInfo();
   });
+
+  // Publicar borrador a Supabase
+  document.getElementById("publishBtn")?.addEventListener("click", publishChanges);
 
   // Date range picker
   document.getElementById("weekStartInput")?.addEventListener("change", (e) => {
@@ -336,132 +350,75 @@ function bindEditorEvents() {
     updateEditorWeekRange();
     renderBoard();
     scheduleAutoSave();
+    markDirty();
   });
 }
 
 /* ── Autosave ─────────────────────────────────── */
 
 function scheduleAutoSave() {
-  updateSaveStatus("saving");
   clearTimeout(saveTimer);
   saveTimer = setTimeout(autoSave, SAVE_DEBOUNCE_MS);
 }
 
 async function autoSave() {
-  // 1) Guardar localmente siempre
+  // Solo guarda localmente. La publicación a Supabase es manual ("Guardar cambios").
   saveEditorLocal(editorState);
-
-  // 2) Si hay slug + writeKey, guardar en Supabase
-  if (sbClient && currentSlug && writeKey) {
-    try {
-      await sbRpcSave(currentSlug, editorState, writeKey);
-      updateSaveStatus("ok");
-    } catch (e) {
-      console.warn("[Planner] Error guardando en Supabase:", e.message);
-      updateSaveStatus("error");
-    }
-  } else {
-    updateSaveStatus("ok");
-  }
 }
 
-/* ── Botón "Compartir con la tía" ─────────────── */
+/* ── Botón "Copiar link de la tía" ────────────── */
 
 async function handleShare() {
+  if (!currentSlug) {
+    showToast("Primero guarda los cambios para crear el link de la tía.", "info");
+    return;
+  }
+
   const btn = document.getElementById("shareBtn");
   btn.disabled = true;
 
   try {
-    if (currentSlug) {
-      // ── Plan ya existe: SIEMPRE copiar el mismo link ───────────────────────
-      // Si Supabase está activo y tenemos writeKey, verificar que el registro
-      // remoto siga existiendo (puede haberse borrado desde el panel).
-      if (sbClient && writeKey) {
-        const row = await sbSelectBySlug(currentSlug);
-        if (!row) {
-          // Registro borrado remotamente → recrear con MISMO slug y writeKey
-          btn.textContent = "Recreando plan…";
-          try {
-            await sbRpcCreate(currentSlug, editorState, writeKey);
-          } catch (e) {
-            // "already exists" = volvió a aparecer (race condition) — ignorar
-            if (
-              !e.message?.includes("already exists") &&
-              !e.message?.includes("duplicate")
-            ) {
-              throw e;
-            }
+    // Verificar que el registro remoto siga existiendo (por si lo borraron)
+    if (sbClient && writeKey) {
+      const row = await sbSelectBySlug(currentSlug);
+      if (!row) {
+        btn.textContent = "Recreando plan…";
+        try {
+          await sbRpcCreate(currentSlug, editorState, writeKey);
+        } catch (e) {
+          if (
+            !e.message?.includes("already exists") &&
+            !e.message?.includes("duplicate")
+          ) {
+            throw e;
           }
-          showToast("Plan recreado con el mismo link. ✓", "success");
         }
-      }
-      await copyShareLink(currentSlug);
-      showToast("¡Link copiado al portapapeles! ✓", "success");
-      return;
-    }
-
-    // ── No existe plan todavía: crear uno nuevo ────────────────────────────
-    if (!sbClient) {
-      showToast(
-        "Supabase no está configurado. Edita SUPABASE_URL y SUPABASE_ANON_KEY en app.js.",
-        "error",
-      );
-      return;
-    }
-
-    btn.textContent = "Creando link…";
-    saveEditorLocal(editorState);
-
-    let slug = generateSlug(8);
-    const wk = generateWriteKey(40);
-
-    let attempts = 0;
-    while (attempts < 3) {
-      try {
-        await sbRpcCreate(slug, editorState, wk);
-        break;
-      } catch (e) {
-        if (
-          e.message?.includes("already exists") ||
-          e.message?.includes("duplicate")
-        ) {
-          slug = generateSlug(8);
-          attempts++;
-        } else {
-          throw e;
-        }
+        showToast("Plan recreado con el mismo link. ✓", "success");
       }
     }
-
-    currentSlug = slug;
-    writeKey = wk;
-    localStorage.setItem(LS_SLUG_KEY, currentSlug);
-    localStorage.setItem(LS_WRITE_KEY, writeKey);
-    updateSlugInfo();
-    updateShareBtn();
-
     await copyShareLink(currentSlug);
-    showToast(`Plan creado. Link copiado. ✓`, "success");
+    showToast("¡Link copiado al portapapeles! ✓", "success");
   } catch (e) {
     console.error("[Planner] Error al compartir:", e);
-    showToast(
-      `Error: ${e.message ?? "No se pudo crear el plan remoto."}`,
-      "error",
-    );
+    showToast(`Error: ${e.message ?? "No se pudo copiar el link."}`, "error");
   } finally {
     btn.disabled = false;
     updateShareBtn();
   }
 }
 
-/** Sincroniza el texto de los botones de compartir con el estado actual. */
+/** Sincroniza texto y estado disabled de los botones de compartir. */
 function updateShareBtn() {
-  const label = currentSlug ? "Copiar link de la tía" : "Crear y copiar link";
-  const floatLabel = currentSlug ? "↗ Copiar link" : "↗ Crear link";
   const btn = document.getElementById("shareBtn");
   const floatingBtn = document.getElementById("floatingShareBtn");
-  if (btn) btn.textContent = label;
-  if (floatingBtn) floatingBtn.textContent = floatLabel;
+  if (btn) {
+    btn.disabled = !currentSlug;
+    btn.textContent = "Copiar link de la tía";
+  }
+  if (floatingBtn) {
+    floatingBtn.disabled = !currentSlug;
+    floatingBtn.textContent = "↗ Copiar link";
+  }
 }
 
 async function copyShareLink(slug) {
@@ -472,17 +429,127 @@ async function copyShareLink(slug) {
 
 /* ── Helpers de UI del editor ─────────────────── */
 
-function updateSaveStatus(status) {
-  const el = document.getElementById("saveStatus");
+function updatePublishStatus(status) {
+  const el = document.getElementById("publishStatus");
   if (!el) return;
   const MAP = {
-    ok: { cls: "save-status--ok", text: "Guardado ✓" },
-    saving: { cls: "save-status--saving", text: "Guardando…" },
-    error: { cls: "save-status--error", text: "Error (guardado local)" },
+    ok:         { cls: "publish-status--ok",         text: "Publicado ✓" },
+    dirty:      { cls: "publish-status--dirty",      text: "Cambios sin publicar" },
+    publishing: { cls: "publish-status--publishing", text: "Publicando…" },
+    error:      { cls: "publish-status--error",      text: "Error al publicar" },
+    none:       { cls: "publish-status--none",       text: "" },
   };
-  const cfg = MAP[status] ?? MAP.ok;
-  el.className = `save-status ${cfg.cls}`;
+  const cfg = MAP[status] ?? MAP.none;
+  el.className = `publish-status ${cfg.cls}`;
   el.textContent = cfg.text;
+}
+
+/* ── Estado "publicado" / "con cambios" ──────── */
+
+function initPublishState() {
+  const savedSnapshot = localStorage.getItem(LS_PUBLISHED_KEY);
+  lastPublishedSnapshot = savedSnapshot || null;
+
+  if (!currentSlug) {
+    isDirty = false;
+    updatePublishStatus("none");
+  } else if (!lastPublishedSnapshot) {
+    // Plan existe pero no hay snapshot → asumir dirty para que el botón esté activo
+    isDirty = true;
+    updatePublishStatus("dirty");
+  } else {
+    isDirty = JSON.stringify(editorState) !== lastPublishedSnapshot;
+    updatePublishStatus(isDirty ? "dirty" : "ok");
+  }
+  updatePublishBtn();
+}
+
+function markDirty() {
+  if (!isDirty) {
+    isDirty = true;
+    updatePublishBtn();
+    updatePublishStatus("dirty");
+  }
+}
+
+function updatePublishBtn() {
+  const btn = document.getElementById("publishBtn");
+  if (!btn) return;
+  if (!currentSlug) {
+    btn.disabled = false;
+    btn.textContent = "Publicar plan";
+  } else {
+    btn.disabled = !isDirty;
+    btn.textContent = "Guardar cambios";
+  }
+}
+
+async function publishChanges() {
+  const btn = document.getElementById("publishBtn");
+  btn.disabled = true;
+  updatePublishStatus("publishing");
+
+  try {
+    if (!sbClient) {
+      showToast(
+        "Supabase no está configurado. Los cambios solo se guardaron en el dispositivo.",
+        "error",
+      );
+      updatePublishStatus("error");
+      return;
+    }
+
+    if (!currentSlug || !writeKey) {
+      // Primera publicación: crear el plan remoto
+      btn.textContent = "Creando plan…";
+      let slug = generateSlug(8);
+      const wk = generateWriteKey(40);
+
+      let attempts = 0;
+      while (attempts < 3) {
+        try {
+          await sbRpcCreate(slug, editorState, wk);
+          break;
+        } catch (e) {
+          if (
+            e.message?.includes("already exists") ||
+            e.message?.includes("duplicate")
+          ) {
+            slug = generateSlug(8);
+            attempts++;
+          } else {
+            throw e;
+          }
+        }
+      }
+
+      currentSlug = slug;
+      writeKey = wk;
+      localStorage.setItem(LS_SLUG_KEY, currentSlug);
+      localStorage.setItem(LS_WRITE_KEY, writeKey);
+      updateSlugInfo();
+      updateShareBtn();
+    } else {
+      // Plan ya existe: actualizar
+      await sbRpcSave(currentSlug, editorState, writeKey);
+    }
+
+    // Guardar snapshot del estado publicado
+    lastPublishedSnapshot = JSON.stringify(editorState);
+    localStorage.setItem(LS_PUBLISHED_KEY, lastPublishedSnapshot);
+    isDirty = false;
+    updatePublishStatus("ok");
+    showToast("¡Cambios publicados! La tía puede verlos. ✓", "success");
+  } catch (e) {
+    console.error("[Planner] Error al publicar:", e);
+    updatePublishStatus("error");
+    showToast(
+      `Error al publicar: ${e.message ?? ""}. Cambios guardados en el dispositivo.`,
+      "error",
+    );
+  } finally {
+    updatePublishBtn();
+  }
 }
 
 function updateSlugInfo() {

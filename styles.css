@@ -147,9 +147,9 @@ body {
   align-items: center;
 }
 
-/* ── Save status ─────────────────────────────── */
+/* ── Publish status ──────────────────────────── */
 
-.save-status {
+.publish-status {
   font-size: 12px;
   font-weight: 600;
   padding: 5px 10px;
@@ -157,9 +157,11 @@ body {
   white-space: nowrap;
 }
 
-.save-status--ok     { color: var(--success); }
-.save-status--saving { color: var(--text-muted); animation: pulse 1s ease-in-out infinite; }
-.save-status--error  { color: var(--danger); }
+.publish-status--ok         { color: var(--success); }
+.publish-status--dirty      { color: #fbbf24; } /* amber */
+.publish-status--publishing { color: var(--text-muted); animation: pulse 1s ease-in-out infinite; }
+.publish-status--error      { color: var(--danger); }
+.publish-status--none       { display: none; }
 
 @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
 
@@ -217,6 +219,28 @@ body {
 .btn-share:hover {
   transform: translateY(-2px);
   box-shadow: 0 12px 36px var(--purple-glow);
+}
+.btn-share:disabled {
+  opacity: 0.35;
+  cursor: default;
+  transform: none !important;
+  box-shadow: none !important;
+}
+
+.btn-publish {
+  background: linear-gradient(135deg, #7c4dff, #ff4fd8);
+  border: none;
+  box-shadow: 0 6px 20px var(--purple-glow);
+}
+.btn-publish:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 10px 32px var(--pink-glow);
+}
+.btn-publish:disabled {
+  opacity: 0.32;
+  cursor: default;
+  transform: none !important;
+  box-shadow: none !important;
 }
 
 /* ── Tabs bar ────────────────────────────────── */
