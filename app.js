@@ -119,11 +119,10 @@ function renderEditorView() {
   currentSlug = localStorage.getItem(LS_SLUG_KEY) || null;
   writeKey = localStorage.getItem(LS_WRITE_KEY) || null;
   activeTab = "week";
-  // En móvil, abrir con el día de hoy si es lunes-viernes
+  // En móvil: mostrar el día de hoy (o lunes si es fin de semana)
   if (window.innerWidth <= 768) {
     const keyMap = { 1: "mon", 2: "tue", 3: "wed", 4: "thu", 5: "fri" };
-    const todayKey = keyMap[new Date().getDay()];
-    if (todayKey) activeTab = todayKey;
+    activeTab = keyMap[new Date().getDay()] || "mon";
   }
 
   document.getElementById("app").innerHTML = buildEditorHTML();
@@ -131,7 +130,6 @@ function renderEditorView() {
   bindEditorEvents();
   updateEditorWeekRange();
   renderBoard();
-  bindSwipe();
   updateSaveStatus("ok");
   updateSlugInfo();
 }
@@ -154,7 +152,7 @@ function buildEditorHTML() {
       <div class="actions">
         <span id="saveStatus" class="save-status save-status--ok">Guardado ✓</span>
         <span id="planSlugInfo" class="plan-slug-info" style="display:none"></span>
-        <button id="shareBtn" class="btn btn-share" type="button">Compartir con la tía ↗</button>
+        <button id="shareBtn" class="btn btn-share" type="button">${currentSlug ? "Copiar link de la tía" : "Crear y copiar link"}</button>
         <button id="exportPngBtn" class="btn btn-soft" type="button">Guardar imagen</button>
         <button id="exportPdfBtn" class="btn btn-primary" type="button">Exportar PDF</button>
         <button id="resetBtn" class="btn btn-danger" type="button">Reset</button>
@@ -183,7 +181,7 @@ function buildEditorHTML() {
         <div id="board" class="board board--week"></div>
       </div>
     </main>
-    <button id="floatingShareBtn" class="floating-share" type="button">↗ Compartir</button>
+    <button id="floatingShareBtn" class="floating-share" type="button">↗ ${currentSlug ? "Copiar link" : "Crear link"}</button>
   `;
 }
 
@@ -195,12 +193,26 @@ function renderBoard() {
 
   const startISO = editorState?.meta?.weekStartISO || null;
   const { dates } = getWeekDates(startISO);
+  const isMobile = window.innerWidth <= 768;
 
-  if (activeTab === "week") {
+  if (activeTab === "week" && !isMobile) {
+    // Desktop: cuadrícula de 5 columnas
     board.className = "board board--week";
     board.innerHTML = "";
     DAYS.forEach((d, i) => board.appendChild(buildDayColumn(d, dates[i])));
+  } else if (isMobile) {
+    // Móvil: todos los días en el DOM, solo se muestra el activo con CSS.
+    // Así el switch de día NO reconstruye el DOM → sin pérdida de foco ni scroll.
+    const visibleKey = activeTab === "week" ? "mon" : activeTab;
+    board.className = "board board--mobile";
+    board.innerHTML = "";
+    DAYS.forEach((d, i) => {
+      const col = buildDayColumn(d, dates[i]);
+      if (d.key !== visibleKey) col.classList.add("day--hidden");
+      board.appendChild(col);
+    });
   } else {
+    // Desktop: vista de un solo día
     const idx = DAYS.findIndex((d) => d.key === activeTab);
     const dayDef = DAYS[idx];
     board.className = "board board--day";
@@ -360,13 +372,35 @@ async function handleShare() {
   btn.disabled = true;
 
   try {
-    // Si ya existe un slug, solo copiar el link
     if (currentSlug) {
+      // ── Plan ya existe: SIEMPRE copiar el mismo link ───────────────────────
+      // Si Supabase está activo y tenemos writeKey, verificar que el registro
+      // remoto siga existiendo (puede haberse borrado desde el panel).
+      if (sbClient && writeKey) {
+        const row = await sbSelectBySlug(currentSlug);
+        if (!row) {
+          // Registro borrado remotamente → recrear con MISMO slug y writeKey
+          btn.textContent = "Recreando plan…";
+          try {
+            await sbRpcCreate(currentSlug, editorState, writeKey);
+          } catch (e) {
+            // "already exists" = volvió a aparecer (race condition) — ignorar
+            if (
+              !e.message?.includes("already exists") &&
+              !e.message?.includes("duplicate")
+            ) {
+              throw e;
+            }
+          }
+          showToast("Plan recreado con el mismo link. ✓", "success");
+        }
+      }
       await copyShareLink(currentSlug);
       showToast("¡Link copiado al portapapeles! ✓", "success");
       return;
     }
 
+    // ── No existe plan todavía: crear uno nuevo ────────────────────────────
     if (!sbClient) {
       showToast(
         "Supabase no está configurado. Edita SUPABASE_URL y SUPABASE_ANON_KEY en app.js.",
@@ -376,15 +410,11 @@ async function handleShare() {
     }
 
     btn.textContent = "Creando link…";
-
-    // Guardar estado local antes de crear remoto
     saveEditorLocal(editorState);
 
-    // Generar slug y writeKey únicos
     let slug = generateSlug(8);
     const wk = generateWriteKey(40);
 
-    // Reintentar si slug ya existe (muy improbable pero seguro)
     let attempts = 0;
     while (attempts < 3) {
       try {
@@ -403,15 +433,15 @@ async function handleShare() {
       }
     }
 
-    // Persistir en localStorage
     currentSlug = slug;
     writeKey = wk;
     localStorage.setItem(LS_SLUG_KEY, currentSlug);
     localStorage.setItem(LS_WRITE_KEY, writeKey);
     updateSlugInfo();
+    updateShareBtn();
 
     await copyShareLink(currentSlug);
-    showToast(`Plan creado (${slug}). Link copiado. ✓`, "success");
+    showToast(`Plan creado. Link copiado. ✓`, "success");
   } catch (e) {
     console.error("[Planner] Error al compartir:", e);
     showToast(
@@ -420,8 +450,18 @@ async function handleShare() {
     );
   } finally {
     btn.disabled = false;
-    btn.textContent = "Compartir con la tía ↗";
+    updateShareBtn();
   }
+}
+
+/** Sincroniza el texto de los botones de compartir con el estado actual. */
+function updateShareBtn() {
+  const label = currentSlug ? "Copiar link de la tía" : "Crear y copiar link";
+  const floatLabel = currentSlug ? "↗ Copiar link" : "↗ Crear link";
+  const btn = document.getElementById("shareBtn");
+  const floatingBtn = document.getElementById("floatingShareBtn");
+  if (btn) btn.textContent = label;
+  if (floatingBtn) floatingBtn.textContent = floatLabel;
 }
 
 async function copyShareLink(slug) {
@@ -512,6 +552,7 @@ function buildReaderHTML() {
       <div class="reader-actions">
         <span id="lastUpdated" class="last-updated"></span>
         <button id="readerRefreshBtn" class="reader-btn" type="button">↻ Actualizar</button>
+        <span id="changesIndicator" class="changes-badge" style="display:none">● Hay cambios</span>
         <button id="readerExportPngBtn" class="reader-btn" type="button">Imagen</button>
         <button id="readerExportPdfBtn" class="reader-btn reader-btn--primary" type="button">PDF</button>
       </div>
@@ -551,6 +592,7 @@ async function loadReaderData(slug) {
       return;
     }
 
+    hideChangesIndicator();
     renderReaderContent(row.data, row.updated_at);
   } catch (e) {
     console.error("[Planner] Error cargando plan:", e);
@@ -630,11 +672,39 @@ function buildReaderDayHTML(dayDef, dateObj, dayData) {
   `;
 }
 
-/* ── Polling ──────────────────────────────────── */
+/* ── Polling (solo comprueba updated_at) ─────── */
 
 function startPolling(slug) {
   stopPolling();
-  pollingTimer = setInterval(() => loadReaderData(slug), POLL_INTERVAL_MS);
+  // Polling liviano: solo compara updated_at, NO recarga el contenido.
+  pollingTimer = setInterval(() => checkForUpdates(slug), POLL_INTERVAL_MS);
+}
+
+/** Consulta solo updated_at y activa el badge si el servidor tiene datos nuevos. */
+async function checkForUpdates(slug) {
+  try {
+    const serverUpdatedAt = await sbSelectUpdatedAt(slug);
+    if (serverUpdatedAt && serverUpdatedAt !== lastReaderUpdated) {
+      showChangesIndicator();
+    }
+  } catch (e) {
+    // Error de red en polling → silencioso, no romper la vista
+    console.warn("[Planner] Polling error:", e.message);
+  }
+}
+
+function showChangesIndicator() {
+  const badge = document.getElementById("changesIndicator");
+  const btn = document.getElementById("readerRefreshBtn");
+  if (badge) badge.style.display = "";
+  if (btn) btn.classList.add("reader-btn--alert");
+}
+
+function hideChangesIndicator() {
+  const badge = document.getElementById("changesIndicator");
+  const btn = document.getElementById("readerRefreshBtn");
+  if (badge) badge.style.display = "none";
+  if (btn) btn.classList.remove("reader-btn--alert");
 }
 
 function stopPolling() {
@@ -707,6 +777,18 @@ async function sbRpcSave(slug, planData, wk) {
 
   if (error) throw new Error(error.message ?? JSON.stringify(error));
   return data;
+}
+
+/** Solo trae updated_at — consulta liviana para el polling. */
+async function sbSelectUpdatedAt(slug) {
+  if (!sbClient) throw new Error("Supabase no configurado");
+  const { data, error } = await sbClient
+    .from("weekly_plans")
+    .select("updated_at")
+    .eq("slug", slug)
+    .limit(1);
+  if (error) throw error;
+  return data?.[0]?.updated_at ?? null;
 }
 
 /* ══════════════════════════════════════════════
@@ -912,39 +994,21 @@ function switchToTab(key) {
   document.querySelectorAll(".tab").forEach((t) => {
     t.classList.toggle("active", t.dataset.tab === key);
   });
-  renderBoard();
-  // Scroll del tab activo al centro en la barra (útil en móvil)
+
+  if (window.innerWidth <= 768) {
+    // Móvil: solo muestra/oculta el día — sin reconstruir DOM.
+    // Así los textareas mantienen foco, scroll y valor exactamente donde estaban.
+    document.querySelectorAll("#board .day").forEach((dayEl) => {
+      dayEl.classList.toggle("day--hidden", dayEl.dataset.day !== key);
+    });
+  } else {
+    renderBoard();
+  }
+
+  // Centra el tab seleccionado en la barra de tabs (útil en móvil)
   document
     .querySelector(`.tab[data-tab="${key}"]`)
     ?.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "center" });
-}
-
-/* ── Swipe horizontal para cambiar día (móvil) ── */
-
-function bindSwipe() {
-  const container = document.getElementById("reportArea");
-  if (!container || container.dataset.swipeBound) return;
-  container.dataset.swipeBound = "true";
-
-  let startX = 0;
-  container.addEventListener(
-    "touchstart",
-    (e) => { startX = e.touches[0].clientX; },
-    { passive: true },
-  );
-  container.addEventListener(
-    "touchend",
-    (e) => {
-      const dx = e.changedTouches[0].clientX - startX;
-      if (Math.abs(dx) < 60) return; // umbral mínimo de swipe
-
-      const allTabs = ["week", ...DAYS.map((d) => d.key)];
-      const curIdx = allTabs.indexOf(activeTab);
-      if (dx < 0 && curIdx < allTabs.length - 1) switchToTab(allTabs[curIdx + 1]);
-      else if (dx > 0 && curIdx > 0)              switchToTab(allTabs[curIdx - 1]);
-    },
-    { passive: true },
-  );
 }
 
 /* ── Arranque ─────────────────────────────────── */

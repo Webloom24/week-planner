@@ -465,6 +465,14 @@ body.exporting .week-picker-wrap { display: none !important; }
 .block textarea::placeholder  { color: rgba(255, 255, 255, 0.18); }
 .board--day .block textarea   { min-height: 160px; }
 
+/* ── Clase de ocultar día (móvil) ───────────── */
+.day--hidden { display: none !important; }
+
+/* ── Board móvil (un día a la vez) ──────────── */
+.board--mobile {
+  display: block;
+}
+
 /* ── Botón flotante — solo móvil ─────────────── */
 
 .floating-share {
@@ -630,6 +638,29 @@ body.view-mode {
 .reader-btn--primary:hover {
   transform: translateY(-2px);
   box-shadow: 0 8px 24px var(--purple-glow);
+}
+
+/* Botón de actualizar cuando hay cambios pendientes */
+.reader-btn--alert {
+  border-color: rgba(255, 79, 216, 0.55) !important;
+  color: #c060ff !important;
+  animation: pulse 1.4s ease-in-out infinite;
+}
+
+/* Badge "Hay cambios" */
+.changes-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  font-weight: 700;
+  color: #fff;
+  background: var(--gradient-main);
+  padding: 5px 12px;
+  border-radius: 999px;
+  white-space: nowrap;
+  box-shadow: 0 3px 12px var(--pink-glow);
+  animation: pulse 1.4s ease-in-out infinite;
 }
 
 /* ── Reader main ─────────────────────────────── */
@@ -853,11 +884,24 @@ body.view-mode.exporting .reader-day-name {
   .tabs-bar { padding: 10px 14px; gap: 6px; }
   .tab { padding: 8px 14px; font-size: 12px; }
 
+  /* La vista "Semana" no existe en móvil — se muestra un día a la vez */
+  .tab[data-tab="week"] { display: none; }
+
   .layout { padding: 12px; }
   .report-area { padding: 14px; }
 
   /* Slug info innecesario en móvil */
   .plan-slug-info { display: none !important; }
+
+  /* Week picker compacto en móvil */
+  .week-picker-wrap { margin-left: 0; }
+
+  /* Textareas más grandes y con font-size 16px para evitar el zoom de iOS.
+     Safari hace zoom automático cuando font-size < 16px en un input/textarea. */
+  .block textarea {
+    min-height: 160px;
+    font-size: 16px;
+  }
 
   .reader-topbar { padding: 12px 14px; }
   .reader-actions { gap: 6px; }
